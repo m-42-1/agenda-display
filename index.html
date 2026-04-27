@@ -31,12 +31,14 @@
       border-bottom: 2px solid #333;
       display: flex;
       flex-direction: column;
+      align-items: center;
+      text-align: center;
       gap: 2px;
     }
 
     #header-date {
       font-size: 1.1rem;
-      color: #888;
+      color: #b0b0b0;
       font-weight: 500;
     }
 
@@ -82,17 +84,33 @@
     }
 
     .event-time {
-      color: #888;
+      color: #b0b0b0;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
       font-size: 1rem;
-      padding-top: 1px;
+      padding-top: 2px;
+    }
+
+    .event-content {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
     }
 
     .event-title {
       font-weight: 500;
       color: #f0f0f0;
       word-break: break-word;
+      line-height: 1.35;
+    }
+
+    .event-description {
+      font-size: 0.85rem;
+      color: #b0b0b0;
+      line-height: 1.4;
+      word-break: break-word;
+      white-space: pre-wrap;
     }
 
     #loading {
@@ -100,7 +118,7 @@
       align-items: center;
       justify-content: center;
       height: 60px;
-      color: #666;
+      color: #888;
       font-size: 1rem;
       padding: 20px;
     }
@@ -295,26 +313,98 @@
     renderAgenda(byDay, windowStart, windowEnd);
   }
 
-  function addEvent(byDay, event, dtstart, dtend) {
-    const isAllDay = dtstart.isDate;
-    const jsStart = dtstart.toJSDate();
-    const jsEnd = dtend ? dtend.toJSDate() : jsStart;
+  function utcYmd(d) {
+    return `${String(d.getUTCFullYear()).padStart(4,'0')}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+  }
 
-    let key;
+  function pushEntry(byDay, key, entry) {
+    if (!byDay[key]) byDay[key] = [];
+    byDay[key].push(entry);
+  }
+
+  function addEvent(byDay, event, dtstart, dtend) {
+    const description = (event.description || '').trim();
+    const title = event.summary || '(bez názvu)';
+    const isAllDay = dtstart.isDate;
+
+    // ── Pure all-day events (VALUE=DATE) — expand each day in [dtstart, dtend)
     if (isAllDay) {
-      // All-day: dtstart is a plain date, not a datetime — use its literal date
-      key = `${String(dtstart.year).padStart(4,'0')}-${String(dtstart.month).padStart(2,'0')}-${String(dtstart.day).padStart(2,'0')}`;
-    } else {
-      key = dateKey(jsStart);
+      const endDate = dtend
+        ? new Date(Date.UTC(dtend.year, dtend.month - 1, dtend.day))
+        : new Date(Date.UTC(dtstart.year, dtstart.month - 1, dtstart.day + 1));
+      const cur = new Date(Date.UTC(dtstart.year, dtstart.month - 1, dtstart.day));
+      let days = 0;
+      while (cur < endDate && days++ < 400) {
+        pushEntry(byDay, utcYmd(cur), {
+          isAllDay: true,
+          startMs: cur.getTime(),
+          timeLabel: 'Celý deň',
+          title,
+          description,
+        });
+        cur.setUTCDate(cur.getUTCDate() + 1);
+      }
+      return;
     }
 
-    if (!byDay[key]) byDay[key] = [];
-    byDay[key].push({
-      isAllDay,
-      startMs: jsStart.getTime(),
-      timeLabel: isAllDay ? 'Celý deň' : `${timeStr(jsStart)} – ${timeStr(jsEnd)}`,
-      title: event.summary || '(bez názvu)',
-    });
+    // ── Timed events
+    const jsStart = dtstart.toJSDate();
+    const jsEnd = dtend ? dtend.toJSDate() : jsStart;
+    const startKey = dateKey(jsStart);
+    let endKey = dateKey(jsEnd);
+    const startTime = timeStr(jsStart);
+    const endTime = timeStr(jsEnd);
+
+    // Single-day timed event
+    if (startKey === endKey) {
+      pushEntry(byDay, startKey, {
+        isAllDay: false,
+        startMs: jsStart.getTime(),
+        timeLabel: `${startTime} – ${endTime}`,
+        title,
+        description,
+      });
+      return;
+    }
+
+    // Multi-day timed event: event ending exactly at midnight on a later day
+    // really ends at end of previous day — drop the trailing midnight day.
+    if (endTime === '00:00' && endKey > startKey) {
+      const prev = new Date(jsEnd.getTime() - 86400000);
+      endKey = dateKey(prev);
+    }
+
+    // Iterate from startKey to endKey using UTC date arithmetic (date-only safe)
+    const [sy, sm, sd] = startKey.split('-').map(Number);
+    const [ey, em, ed] = endKey.split('-').map(Number);
+    const cur = new Date(Date.UTC(sy, sm - 1, sd));
+    const last = new Date(Date.UTC(ey, em - 1, ed));
+    let days = 0;
+    while (cur.getTime() <= last.getTime() && days++ < 400) {
+      const k = utcYmd(cur);
+      let label, allDayFlag, startMs;
+      if (k === startKey) {
+        label = `od ${startTime}`;
+        allDayFlag = false;
+        startMs = jsStart.getTime();
+      } else if (k === endKey) {
+        label = `do ${endTime}`;
+        allDayFlag = true; // sorts to top; this is a continuation ending today
+        startMs = cur.getTime();
+      } else {
+        label = 'Celý deň';
+        allDayFlag = true;
+        startMs = cur.getTime();
+      }
+      pushEntry(byDay, k, {
+        isAllDay: allDayFlag,
+        startMs,
+        timeLabel: label,
+        title,
+        description,
+      });
+      cur.setUTCDate(cur.getUTCDate() + 1);
+    }
   }
 
   function renderAgenda(byDay, windowStart, windowEnd) {
@@ -328,7 +418,7 @@
     }).sort();
 
     if (keys.length === 0) {
-      agenda.innerHTML = '<p style="padding:24px 0;color:#666;">Žiadne udalosti v nasledujúcich 3 mesiacoch.</p>';
+      agenda.innerHTML = '<p style="padding:24px 0;color:#888;">Žiadne udalosti v nasledujúcich 3 mesiacoch.</p>';
       return;
     }
 
@@ -360,12 +450,23 @@
         timeEl.className = 'event-time';
         timeEl.textContent = ev.timeLabel;
 
+        const contentEl = document.createElement('div');
+        contentEl.className = 'event-content';
+
         const titleEl = document.createElement('div');
         titleEl.className = 'event-title';
         titleEl.textContent = ev.title;
+        contentEl.appendChild(titleEl);
+
+        if (ev.description) {
+          const descEl = document.createElement('div');
+          descEl.className = 'event-description';
+          descEl.textContent = ev.description;
+          contentEl.appendChild(descEl);
+        }
 
         row.appendChild(timeEl);
-        row.appendChild(titleEl);
+        row.appendChild(contentEl);
         block.appendChild(row);
       }
 
@@ -389,7 +490,7 @@
       errEl.style.display = 'block';
       errEl.innerHTML = `<strong>Chyba pri načítaní kalendára</strong>
         Skontrolujte internetové pripojenie a obnovte stránku.<br>
-        <span style="color:#888;font-size:0.9rem">${err.message}</span>`;
+        <span style="color:#b0b0b0;font-size:0.9rem">${err.message}</span>`;
     }
   }
 
