@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#000000">
+  <title>Kalendár</title>
+  <script src="https://cdn.jsdelivr.net/npm/ical.js@1.5.0/build/ical.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background: #000;
+      color: #f0f0f0;
+      padding-top: 40px;
+      -webkit-overflow-scrolling: touch;
+      overflow-y: auto;
+    }
+
+    #sticky-header {
+      position: sticky;
+      top: 0;
+      background: #000;
+      z-index: 10;
+      padding: 14px 20px 12px;
+      border-bottom: 2px solid #333;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    #header-date {
+      font-size: 1.1rem;
+      color: #888;
+      font-weight: 500;
+    }
+
+    #header-clock {
+      font-size: 2.6rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      font-variant-numeric: tabular-nums;
+      line-height: 1;
+      color: #fff;
+    }
+
+    #agenda {
+      padding: 0 20px 40px;
+    }
+
+    .day-block {
+      margin-top: 28px;
+    }
+
+    .day-header {
+      font-size: 1.25rem;
+      font-weight: 700;
+      padding-bottom: 8px;
+      border-bottom: 2px solid #333;
+      margin-bottom: 10px;
+      color: #fff;
+    }
+
+    .event {
+      display: grid;
+      grid-template-columns: 7rem 1fr;
+      gap: 8px;
+      align-items: baseline;
+      padding: 7px 0;
+      border-bottom: 1px solid #1e1e1e;
+      font-size: 1.1rem;
+      line-height: 1.4;
+    }
+
+    .event:last-child {
+      border-bottom: none;
+    }
+
+    .event-time {
+      color: #888;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      font-size: 1rem;
+      padding-top: 1px;
+    }
+
+    .event-title {
+      font-weight: 500;
+      color: #f0f0f0;
+      word-break: break-word;
+    }
+
+    #loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 60px;
+      color: #666;
+      font-size: 1rem;
+      padding: 20px;
+    }
+
+    #error {
+      display: none;
+      padding: 24px 20px;
+      color: #ff6b6b;
+      font-size: 1rem;
+      line-height: 1.5;
+    }
+
+    #error strong {
+      display: block;
+      font-size: 1.1rem;
+      margin-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+
+<header id="sticky-header">
+  <div id="header-date"></div>
+  <div id="header-clock"></div>
+</header>
+
+<div id="loading">Načítavam kalendár…</div>
+<div id="error"></div>
+<main id="agenda"></main>
+
+<script>
+  const ICS_URL = 'https://outlook.office365.com/owa/calendar/2e756fe3580945bd80f7c18d5eedf151@kultura.trnava.sk/fb299a1f15e14af1a6c09121b4f22ed610826515312205160777/calendar.ics';
+  const CORS_PROXIES = [
+    '',
+    'https://corsproxy.io/?url=',
+    'https://api.allorigins.win/raw?url=',
+  ];
+  const TZ = 'Europe/Bratislava';
+  const MONTHS_AHEAD = 3;
+
+  const DAYS_SK = ['Nedeľa', 'Pondelok', 'Utorok', 'Streda', 'Štvrtok', 'Piatok', 'Sobota'];
+  const MONTHS_SK = [
+    'januára', 'februára', 'marca', 'apríla', 'mája', 'júna',
+    'júla', 'augusta', 'septembra', 'októbra', 'novembra', 'decembra'
+  ];
+  const MONTHS_SK_NOM = [
+    'január', 'február', 'marec', 'apríl', 'máj', 'jún',
+    'júl', 'august', 'september', 'október', 'november', 'december'
+  ];
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  function localParts(jsDate) {
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: TZ,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+      weekday: 'narrow',
+    });
+    const p = {};
+    for (const { type, value } of fmt.formatToParts(jsDate)) p[type] = value;
+    // hour can be '24' when Intl wraps midnight
+    if (p.hour === '24') p.hour = '00';
+    return p;
+  }
+
+  function dateKey(jsDate) {
+    const p = localParts(jsDate);
+    return `${p.year}-${p.month}-${p.day}`;
+  }
+
+  function timeStr(jsDate) {
+    const p = localParts(jsDate);
+    return `${p.hour}:${p.minute}`;
+  }
+
+  // Returns a JS Date for midnight (00:00) Bratislava time on a given YYYY-MM-DD string
+  function bratislavaMidnight(yyyy, mm, dd) {
+    const tzFmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+    // Binary-search-free: use a reference point
+    const utcStr = `${yyyy}-${mm}-${dd}T00:00:00Z`;
+    const ref = new Date(utcStr);
+    const p = {};
+    for (const { type, value } of tzFmt.formatToParts(ref)) p[type] = value;
+    // Difference between what UTC midnight shows as in Bratislava vs midnight
+    const tzH = parseInt(p.hour, 10);
+    const tzM = parseInt(p.minute, 10);
+    // offset = tzH*60 + tzM minutes ahead of UTC
+    const offsetMin = tzH * 60 + tzM;
+    return new Date(ref.getTime() - offsetMin * 60000);
+  }
+
+  function addMonths(date, months) {
+    const d = new Date(date);
+    d.setMonth(d.getMonth() + months);
+    return d;
+  }
+
+  // ── Clock & header date ───────────────────────────────────────────────────
+
+  function updateClock() {
+    const now = new Date();
+    const timeFmt = new Intl.DateTimeFormat('sk-SK', {
+      timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    });
+    document.getElementById('header-clock').textContent = timeFmt.format(now).replace(/\./g, ':');
+
+    const p = localParts(now);
+    const dow = new Date(`${p.year}-${p.month}-${p.day}T12:00:00Z`).getUTCDay();
+    // day-of-week from dateKey
+    const jsDay = new Date(`${p.year}-${p.month}-${p.day}T12:00:00Z`);
+    document.getElementById('header-date').textContent =
+      `${DAYS_SK[jsDay.getUTCDay()]}, ${parseInt(p.day, 10)}. ${MONTHS_SK[parseInt(p.month, 10) - 1]} ${p.year}`;
+  }
+
+  setInterval(updateClock, 1000);
+  updateClock();
+
+  // ── ICS fetch ─────────────────────────────────────────────────────────────
+
+  async function fetchICS() {
+    for (const proxy of CORS_PROXIES) {
+      try {
+        const url = proxy ? proxy + encodeURIComponent(ICS_URL) : ICS_URL;
+        const resp = await fetch(url, { cache: 'no-store' });
+        if (resp.ok) {
+          const text = await resp.text();
+          if (text.includes('BEGIN:VCALENDAR')) return text;
+        }
+      } catch (_) { /* try next */ }
+    }
+    throw new Error('Nepodarilo sa načítať kalendár ani cez proxy.');
+  }
+
+  // ── ICS parse & render ────────────────────────────────────────────────────
+
+  function parseAndRender(icsText) {
+    // Outlook uses both "Central Europe Standard Time" (Windows name, no VTIMEZONE)
+    // and "Customized Time Zone" (has VTIMEZONE in this feed, same CET/CEST rules).
+    // Normalize to the one that has a VTIMEZONE definition so ical.js can resolve it.
+    icsText = icsText.replace(/TZID=Central Europe Standard Time/g, 'TZID=Customized Time Zone');
+
+    const jcal = ICAL.parse(icsText);
+    const comp = new ICAL.Component(jcal);
+
+    // Register VTIMEZONE components so ical.js resolves them when converting to JS Date.
+    // register() accepts an ICAL.Component directly and wraps it internally.
+    for (const vtz of comp.getAllSubcomponents('vtimezone')) {
+      ICAL.TimezoneService.register(vtz);
+    }
+
+    const now = new Date();
+    const todayKey = dateKey(now);
+    // Window: today 00:00 Bratislava → today + 3 months 23:59:59
+    const p = localParts(now);
+    const windowStart = bratislavaMidnight(p.year, p.month, p.day);
+    const windowEnd = addMonths(windowStart, MONTHS_AHEAD);
+
+    // Map: dateKey → array of event objects
+    const byDay = {};
+
+    const vevents = comp.getAllSubcomponents('vevent');
+    for (const vevent of vevents) {
+      const event = new ICAL.Event(vevent);
+
+      if (event.isRecurring()) {
+        const iter = event.iterator();
+        let next;
+        let safety = 0;
+        while ((next = iter.next()) && safety++ < 500) {
+          const jsStart = next.toJSDate();
+          if (jsStart > windowEnd) break;
+          if (jsStart < windowStart) continue;
+          addEvent(byDay, event, next, event.getOccurrenceDetails(next).endDate);
+        }
+      } else {
+        const dtstart = event.startDate;
+        const dtend = event.endDate;
+        const jsStart = dtstart.toJSDate();
+        const jsEnd = dtend ? dtend.toJSDate() : jsStart;
+        if (jsStart >= windowEnd || jsEnd <= windowStart) continue;
+        addEvent(byDay, event, dtstart, dtend);
+      }
+    }
+
+    renderAgenda(byDay, windowStart, windowEnd);
+  }
+
+  function addEvent(byDay, event, dtstart, dtend) {
+    const isAllDay = dtstart.isDate;
+    const jsStart = dtstart.toJSDate();
+    const jsEnd = dtend ? dtend.toJSDate() : jsStart;
+
+    let key;
+    if (isAllDay) {
+      // All-day: dtstart is a plain date, not a datetime — use its literal date
+      key = `${String(dtstart.year).padStart(4,'0')}-${String(dtstart.month).padStart(2,'0')}-${String(dtstart.day).padStart(2,'0')}`;
+    } else {
+      key = dateKey(jsStart);
+    }
+
+    if (!byDay[key]) byDay[key] = [];
+    byDay[key].push({
+      isAllDay,
+      startMs: jsStart.getTime(),
+      timeLabel: isAllDay ? 'Celý deň' : `${timeStr(jsStart)} – ${timeStr(jsEnd)}`,
+      title: event.summary || '(bez názvu)',
+    });
+  }
+
+  function renderAgenda(byDay, windowStart, windowEnd) {
+    const agenda = document.getElementById('agenda');
+    agenda.innerHTML = '';
+
+    // Collect and sort keys within window
+    const keys = Object.keys(byDay).filter(k => {
+      const d = new Date(k + 'T12:00:00Z');
+      return d >= windowStart && d < windowEnd;
+    }).sort();
+
+    if (keys.length === 0) {
+      agenda.innerHTML = '<p style="padding:24px 0;color:#666;">Žiadne udalosti v nasledujúcich 3 mesiacoch.</p>';
+      return;
+    }
+
+    for (const key of keys) {
+      const events = byDay[key].sort((a, b) => {
+        if (a.isAllDay && !b.isAllDay) return -1;
+        if (!a.isAllDay && b.isAllDay) return 1;
+        return a.startMs - b.startMs;
+      });
+
+      const [yyyy, mm, dd] = key.split('-');
+      const refDate = new Date(`${key}T12:00:00Z`);
+      const dow = DAYS_SK[refDate.getUTCDay()];
+      const dayLabel = `${dow}, ${parseInt(dd, 10)}. ${MONTHS_SK[parseInt(mm, 10) - 1]} ${yyyy}`;
+
+      const block = document.createElement('div');
+      block.className = 'day-block';
+
+      const header = document.createElement('div');
+      header.className = 'day-header';
+      header.textContent = dayLabel;
+      block.appendChild(header);
+
+      for (const ev of events) {
+        const row = document.createElement('div');
+        row.className = 'event';
+
+        const timeEl = document.createElement('div');
+        timeEl.className = 'event-time';
+        timeEl.textContent = ev.timeLabel;
+
+        const titleEl = document.createElement('div');
+        titleEl.className = 'event-title';
+        titleEl.textContent = ev.title;
+
+        row.appendChild(timeEl);
+        row.appendChild(titleEl);
+        block.appendChild(row);
+      }
+
+      agenda.appendChild(block);
+    }
+  }
+
+  // ── Main load ─────────────────────────────────────────────────────────────
+
+  async function loadAgenda() {
+    document.getElementById('loading').style.display = 'flex';
+    document.getElementById('error').style.display = 'none';
+
+    try {
+      const icsText = await fetchICS();
+      parseAndRender(icsText);
+      document.getElementById('loading').style.display = 'none';
+    } catch (err) {
+      document.getElementById('loading').style.display = 'none';
+      const errEl = document.getElementById('error');
+      errEl.style.display = 'block';
+      errEl.innerHTML = `<strong>Chyba pri načítaní kalendára</strong>
+        Skontrolujte internetové pripojenie a obnovte stránku.<br>
+        <span style="color:#888;font-size:0.9rem">${err.message}</span>`;
+    }
+  }
+
+  loadAgenda();
+  setInterval(loadAgenda, 5 * 60 * 1000);
+</script>
+</body>
+</html>
