@@ -273,8 +273,10 @@
       if (event.isRecurring()) {
         const iter = event.iterator();
         let next;
+        // Higher safety bound for daily recurrences with old DTSTART
+        // (e.g. event repeating since 2020 needs ~2000 iterations to reach today)
         let safety = 0;
-        while ((next = iter.next()) && safety++ < 500) {
+        while ((next = iter.next()) && safety++ < 10000) {
           const jsStart = next.toJSDate();
           if (jsStart > windowEnd) break;
           if (jsStart < windowStart) continue;
@@ -373,8 +375,8 @@
 
   // ── Main load ─────────────────────────────────────────────────────────────
 
-  async function loadAgenda() {
-    document.getElementById('loading').style.display = 'flex';
+  async function loadAgenda(silent = false) {
+    if (!silent) document.getElementById('loading').style.display = 'flex';
     document.getElementById('error').style.display = 'none';
 
     try {
@@ -392,7 +394,7 @@
   }
 
   loadAgenda();
-  setInterval(loadAgenda, 60 * 1000);
+  setInterval(() => loadAgenda(true), 60 * 1000);
 </script>
 </body>
 </html>
