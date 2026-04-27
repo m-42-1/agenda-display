@@ -36,6 +36,19 @@
       gap: 2px;
     }
 
+    #offline-badge {
+      display: none;
+      position: absolute;
+      top: 14px;
+      right: 16px;
+      font-size: 0.75rem;
+      color: #f59e0b;
+      background: #422006;
+      padding: 3px 8px;
+      border-radius: 4px;
+      letter-spacing: 0.02em;
+    }
+
     #header-date {
       font-size: 1.1rem;
       color: #b0b0b0;
@@ -81,6 +94,22 @@
 
     .event:last-child {
       border-bottom: none;
+    }
+
+    .event-past {
+      opacity: 0.35;
+    }
+
+    .event-current {
+      box-shadow: inset 3px 0 0 #4ade80;
+      padding-left: 10px;
+      margin-left: -10px;
+      padding-right: 10px;
+    }
+
+    .event-current .event-title {
+      color: #4ade80;
+      font-weight: 600;
     }
 
     .event-time {
@@ -143,6 +172,7 @@
 <header id="sticky-header">
   <div id="header-date"></div>
   <div id="header-clock"></div>
+  <div id="offline-badge">⚠ Offline</div>
 </header>
 
 <div id="loading">Načítavam kalendár…</div>
@@ -201,8 +231,11 @@
       timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', hour12: false,
     });
-    // Binary-search-free: use a reference point
-    const utcStr = `${yyyy}-${mm}-${dd}T00:00:00Z`;
+    // Accept both strings (already padded) and numbers — pad to be safe
+    const yStr = String(yyyy).padStart(4, '0');
+    const mStr = String(mm).padStart(2, '0');
+    const dStr = String(dd).padStart(2, '0');
+    const utcStr = `${yStr}-${mStr}-${dStr}T00:00:00Z`;
     const ref = new Date(utcStr);
     const p = {};
     for (const { type, value } of tzFmt.formatToParts(ref)) p[type] = value;
@@ -327,6 +360,10 @@
     const title = event.summary || '(bez názvu)';
     const isAllDay = dtstart.isDate;
 
+    // For day-boundary computations: compute Bratislava-local midnight of a
+    // given Y-M-D as a UTC ms value (so we can compare with Date.now()).
+    const localMidnightMs = (yyyy, mm, dd) => bratislavaMidnight(yyyy, mm, dd).getTime();
+
     // ── Pure all-day events (VALUE=DATE) — expand each day in [dtstart, dtend)
     if (isAllDay) {
       const endDate = dtend
@@ -335,9 +372,13 @@
       const cur = new Date(Date.UTC(dtstart.year, dtstart.month - 1, dtstart.day));
       let days = 0;
       while (cur < endDate && days++ < 400) {
-        pushEntry(byDay, utcYmd(cur), {
+        const dayKey = utcYmd(cur);
+        const [y, m, d] = dayKey.split('-').map(Number);
+        const dayStartMs = localMidnightMs(y, m, d);
+        pushEntry(byDay, dayKey, {
           isAllDay: true,
-          startMs: cur.getTime(),
+          startMs: dayStartMs,
+          endMs: dayStartMs + 86_400_000,
           timeLabel: 'Celý deň',
           title,
           description,
@@ -360,6 +401,7 @@
       pushEntry(byDay, startKey, {
         isAllDay: false,
         startMs: jsStart.getTime(),
+        endMs: jsEnd.getTime(),
         timeLabel: `${startTime} – ${endTime}`,
         title,
         description,
@@ -382,23 +424,29 @@
     let days = 0;
     while (cur.getTime() <= last.getTime() && days++ < 400) {
       const k = utcYmd(cur);
-      let label, allDayFlag, startMs;
+      const [y, mo, d] = k.split('-').map(Number);
+      const dayStartMs = localMidnightMs(y, mo, d);
+      let label, allDayFlag, startMs, endMs;
       if (k === startKey) {
         label = `od ${startTime}`;
         allDayFlag = false;
         startMs = jsStart.getTime();
+        endMs = dayStartMs + 86_400_000; // continues until end of this day
       } else if (k === endKey) {
         label = `do ${endTime}`;
         allDayFlag = true; // sorts to top; this is a continuation ending today
-        startMs = cur.getTime();
+        startMs = dayStartMs;
+        endMs = jsEnd.getTime();
       } else {
         label = 'Celý deň';
         allDayFlag = true;
-        startMs = cur.getTime();
+        startMs = dayStartMs;
+        endMs = dayStartMs + 86_400_000;
       }
       pushEntry(byDay, k, {
         isAllDay: allDayFlag,
         startMs,
+        endMs,
         timeLabel: label,
         title,
         description,
@@ -422,6 +470,8 @@
       return;
     }
 
+    const todayKey = dateKey(new Date());
+
     for (const key of keys) {
       const events = byDay[key].sort((a, b) => {
         if (a.isAllDay && !b.isAllDay) return -1;
@@ -436,6 +486,7 @@
 
       const block = document.createElement('div');
       block.className = 'day-block';
+      if (key === todayKey) block.dataset.today = '1';
 
       const header = document.createElement('div');
       header.className = 'day-header';
@@ -445,6 +496,8 @@
       for (const ev of events) {
         const row = document.createElement('div');
         row.className = 'event';
+        row.dataset.startMs = String(ev.startMs);
+        row.dataset.endMs = String(ev.endMs);
 
         const timeEl = document.createElement('div');
         timeEl.className = 'event-time';
@@ -472,30 +525,95 @@
 
       agenda.appendChild(block);
     }
+
+    applyTodayStateClasses();
+  }
+
+  function applyTodayStateClasses() {
+    const now = Date.now();
+    const todayBlock = document.querySelector('.day-block[data-today="1"]');
+    if (!todayBlock) return;
+    for (const row of todayBlock.querySelectorAll('.event')) {
+      const startMs = Number(row.dataset.startMs);
+      const endMs = Number(row.dataset.endMs);
+      row.classList.remove('event-past', 'event-current');
+      if (endMs <= now) {
+        row.classList.add('event-past');
+      } else if (startMs <= now && now < endMs) {
+        row.classList.add('event-current');
+      }
+    }
   }
 
   // ── Main load ─────────────────────────────────────────────────────────────
 
-  async function loadAgenda(silent = false) {
-    if (!silent) document.getElementById('loading').style.display = 'flex';
-    document.getElementById('error').style.display = 'none';
+  const CACHE_KEY = 'agenda-cache-ics';
+  let lastSuccessfulICS = null;
+  let isOffline = false;
 
+  function updateOfflineBadge() {
+    document.getElementById('offline-badge').style.display = isOffline ? 'block' : 'none';
+  }
+
+  async function loadAgenda(silent = false) {
+    if (!silent && !lastSuccessfulICS) {
+      document.getElementById('loading').style.display = 'flex';
+    }
     try {
       const icsText = await fetchICS();
+      lastSuccessfulICS = icsText;
+      isOffline = false;
+      try { localStorage.setItem(CACHE_KEY, icsText); } catch (_) {}
       parseAndRender(icsText);
       document.getElementById('loading').style.display = 'none';
+      document.getElementById('error').style.display = 'none';
+      updateOfflineBadge();
     } catch (err) {
       document.getElementById('loading').style.display = 'none';
-      const errEl = document.getElementById('error');
-      errEl.style.display = 'block';
-      errEl.innerHTML = `<strong>Chyba pri načítaní kalendára</strong>
-        Skontrolujte internetové pripojenie a obnovte stránku.<br>
-        <span style="color:#b0b0b0;font-size:0.9rem">${err.message}</span>`;
+      if (lastSuccessfulICS) {
+        // Wi-Fi blip — keep showing cached data with a discrete offline badge
+        isOffline = true;
+        parseAndRender(lastSuccessfulICS);
+        updateOfflineBadge();
+      } else {
+        const errEl = document.getElementById('error');
+        errEl.style.display = 'block';
+        errEl.innerHTML = `<strong>Chyba pri načítaní kalendára</strong>
+          Skontrolujte internetové pripojenie a obnovte stránku.<br>
+          <span style="color:#b0b0b0;font-size:0.9rem">${err.message}</span>`;
+      }
     }
   }
 
+  // ── Init: hydrate from localStorage cache (instant render on reload) ──────
+  try {
+    const cached = localStorage.getItem(CACHE_KEY);
+    if (cached && cached.includes('BEGIN:VCALENDAR')) {
+      lastSuccessfulICS = cached;
+      parseAndRender(cached);
+      document.getElementById('loading').style.display = 'none';
+    }
+  } catch (_) {}
+
   loadAgenda();
   setInterval(() => loadAgenda(true), 60 * 1000);
+
+  // Re-apply event-current/event-past classes every minute (between fetches)
+  setInterval(applyTodayStateClasses, 60 * 1000);
+
+  // ── Wake Lock API — defense in depth to keep screen on ────────────────────
+  let wakeLock = null;
+  async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch (_) { /* ignore — Fully Kiosk is the primary mechanism */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !wakeLock) requestWakeLock();
+  });
+  requestWakeLock();
 </script>
 </body>
 </html>
