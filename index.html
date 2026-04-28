@@ -82,8 +82,8 @@
 
     .event {
       display: grid;
-      grid-template-columns: 24px 7rem 1fr;
-      gap: 6px;
+      grid-template-columns: 7rem 1fr;
+      gap: 24px; /* widened to give marker dots room to overflow time cell into the gap */
       align-items: baseline;
       padding: 7px 0;
       border-bottom: 1px solid #1e1e1e;
@@ -99,11 +99,19 @@
       opacity: 0.35;
     }
 
+    .event-time {
+      color: #b0b0b0;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      font-size: 1rem;
+      padding-top: 2px;
+    }
+
     .event-markers {
-      display: flex;
+      display: inline-flex;
       gap: 4px;
-      align-self: start;
-      padding-top: 9px; /* visually align dots with the time text first line */
+      margin-left: 6px;
+      vertical-align: middle;
     }
 
     .event-marker {
@@ -122,21 +130,13 @@
     .event.event-current .event-marker-current {
       display: block;
       background: #ef4444;
-      animation: pulse 1.5s ease-in-out infinite;
+      animation: pulse 1.4s ease-out infinite;
     }
 
     @keyframes pulse {
-      0%   { box-shadow: 0 0 0 0   rgba(239, 68, 68, 0.7); }
-      70%  { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);   }
-      100% { box-shadow: 0 0 0 0   rgba(239, 68, 68, 0);   }
-    }
-
-    .event-time {
-      color: #b0b0b0;
-      font-variant-numeric: tabular-nums;
-      white-space: nowrap;
-      font-size: 1rem;
-      padding-top: 2px;
+      0%   { box-shadow: 0 0 0 0    rgba(239, 68, 68, 0.95); }
+      70%  { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0);    }
+      100% { box-shadow: 0 0 0 0    rgba(239, 68, 68, 0);    }
     }
 
     .event-content {
@@ -533,7 +533,23 @@
 
         const timeEl = document.createElement('div');
         timeEl.className = 'event-time';
-        timeEl.textContent = ev.timeLabel;
+        const timeText = document.createElement('span');
+        timeText.textContent = ev.timeLabel;
+        timeEl.appendChild(timeText);
+
+        // Marker dots inline after the time text (yellow=new, red pulsing=current).
+        // Both spans are always in the DOM; CSS shows them based on row classes.
+        // The markers visually overflow the 7rem time column into the gap to the
+        // content column, which has been widened to fit them.
+        const markersEl = document.createElement('span');
+        markersEl.className = 'event-markers';
+        const newMarker = document.createElement('span');
+        newMarker.className = 'event-marker event-marker-new';
+        markersEl.appendChild(newMarker);
+        const currentMarker = document.createElement('span');
+        currentMarker.className = 'event-marker event-marker-current';
+        markersEl.appendChild(currentMarker);
+        timeEl.appendChild(markersEl);
 
         const contentEl = document.createElement('div');
         contentEl.className = 'event-content';
@@ -557,19 +573,6 @@
           contentEl.appendChild(descEl);
         }
 
-        // Marker dots column (yellow=new, red pulsing=current). Both spans
-        // are always present in the DOM; CSS shows them based on row classes
-        // (.event-new, .event-current).
-        const markersEl = document.createElement('div');
-        markersEl.className = 'event-markers';
-        const newMarker = document.createElement('span');
-        newMarker.className = 'event-marker event-marker-new';
-        markersEl.appendChild(newMarker);
-        const currentMarker = document.createElement('span');
-        currentMarker.className = 'event-marker event-marker-current';
-        markersEl.appendChild(currentMarker);
-
-        row.appendChild(markersEl);
         row.appendChild(timeEl);
         row.appendChild(contentEl);
         block.appendChild(row);
