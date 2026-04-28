@@ -379,6 +379,7 @@
 
   function addEvent(byDay, event, dtstart, dtend) {
     const description = (event.description || '').trim();
+    const location = (event.location || '').trim();
     const title = event.summary || '(bez názvu)';
     const uid = event.uid || null;
     const isAllDay = dtstart.isDate;
@@ -405,6 +406,7 @@
           timeLabel: 'Celý deň',
           title,
           description,
+          location,
           uid,
         });
         cur.setUTCDate(cur.getUTCDate() + 1);
@@ -429,6 +431,7 @@
         timeLabel: `${startTime} – ${endTime}`,
         title,
         description,
+        location,
         uid,
       });
       return;
@@ -475,6 +478,7 @@
         timeLabel: label,
         title,
         description,
+        location,
         uid,
       });
       cur.setUTCDate(cur.getUTCDate() + 1);
@@ -537,6 +541,13 @@
         titleEl.className = 'event-title';
         titleEl.textContent = ev.title;
         contentEl.appendChild(titleEl);
+
+        if (ev.location) {
+          const locEl = document.createElement('div');
+          locEl.className = 'event-description';
+          locEl.textContent = ev.location;
+          contentEl.appendChild(locEl);
+        }
 
         if (ev.description) {
           const descEl = document.createElement('div');
