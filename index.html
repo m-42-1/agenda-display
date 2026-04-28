@@ -194,7 +194,11 @@
   const TZ = 'Europe/Bratislava';
   const MONTHS_AHEAD = 3;
 
-  const NEW_DURATION_MS = 7 * 86_400_000; // yellow dot shows for 7 days after event was created
+  const NEW_DURATION_MS  = 7  * 86_400_000; // yellow dot shows for 7 days after first seen
+  const PRUNE_DURATION_MS = 60 * 86_400_000; // prune UID records older than 60 days
+  const GRACE_MS  = 2 * 60 * 1000;  // events seen in first 2 min after install = not new
+  const SEEN_KEY    = 'agenda-seen-uids';
+  const INSTALL_KEY = 'agenda-install-ts';
 
   const DAYS_SK = ['Nedeľa', 'Pondelok', 'Utorok', 'Streda', 'Štvrtok', 'Piatok', 'Sobota'];
   const MONTHS_SK = [
@@ -319,6 +323,15 @@
 
     const vevents = comp.getAllSubcomponents('vevent');
 
+    // Collect all UIDs in this feed snapshot for new-event tracking
+    const allUids = [];
+    const uidSet = new Set();
+    for (const vevent of vevents) {
+      const uid = vevent.getFirstPropertyValue('uid');
+      if (uid && !uidSet.has(uid)) { uidSet.add(uid); allUids.push(uid); }
+    }
+    updateSeenUids(allUids);
+
     for (const vevent of vevents) {
       const event = new ICAL.Event(vevent);
 
@@ -360,14 +373,8 @@
     const description = (event.description || '').trim();
     const location = (event.location || '').trim();
     const title = event.summary || '(bez názvu)';
+    const uid = event.uid || null;
     const isAllDay = dtstart.isDate;
-
-    // Yellow dot: event is "new" if its CREATED timestamp is within the last 7 days.
-    // This reads directly from the ICS data — no localStorage needed, no race conditions.
-    const createdVal = event.component.getFirstPropertyValue('created');
-    const isNew = createdVal
-      ? (Date.now() - createdVal.toJSDate().getTime() < NEW_DURATION_MS)
-      : false;
 
     // For day-boundary computations: compute Bratislava-local midnight of a
     // given Y-M-D as a UTC ms value (so we can compare with Date.now()).
@@ -392,7 +399,7 @@
           title,
           description,
           location,
-          isNew,
+          uid,
         });
         cur.setUTCDate(cur.getUTCDate() + 1);
       }
@@ -417,7 +424,7 @@
         title,
         description,
         location,
-        isNew,
+        uid,
       });
       return;
     }
@@ -464,7 +471,7 @@
         title,
         description,
         location,
-        isNew,
+        uid,
       });
       cur.setUTCDate(cur.getUTCDate() + 1);
     }
@@ -513,7 +520,7 @@
         row.className = 'event';
         row.dataset.startMs = String(ev.startMs);
         row.dataset.endMs = String(ev.endMs);
-        if (ev.isNew) row.classList.add('event-new');
+        if (isUidNew(ev.uid)) row.classList.add('event-new');
 
         const timeEl = document.createElement('div');
         timeEl.className = 'event-time';
@@ -578,6 +585,45 @@
     document.getElementById('offline-badge').style.display = isOffline ? 'block' : 'none';
   }
 
+  // ── New-event yellow dot (UID tracking) ───────────────────────────────────
+  let seenUids  = {}; // { uid: firstSeenMs }
+  let installTs = 0;
+
+  function initTracking() {
+    try {
+      const raw = localStorage.getItem(SEEN_KEY);
+      if (raw) seenUids = JSON.parse(raw);
+      installTs = Number(localStorage.getItem(INSTALL_KEY)) || 0;
+      if (!installTs) {
+        installTs = Date.now();
+        localStorage.setItem(INSTALL_KEY, String(installTs));
+      }
+    } catch (_) {}
+  }
+
+  // Called on every parseAndRender with the full list of UIDs in the feed.
+  function updateSeenUids(allUids) {
+    const now = Date.now();
+    for (const uid of allUids) {
+      if (!(uid in seenUids)) seenUids[uid] = now;
+    }
+    // Prune old records to keep localStorage lean
+    for (const uid in seenUids) {
+      if (now - seenUids[uid] > PRUNE_DURATION_MS) delete seenUids[uid];
+    }
+    try { localStorage.setItem(SEEN_KEY, JSON.stringify(seenUids)); } catch (_) {}
+  }
+
+  // Returns true only for UIDs that first appeared AFTER the initial grace
+  // period — i.e. genuinely new events, not ones that were there on install.
+  function isUidNew(uid) {
+    if (!uid) return false;
+    const firstSeen = seenUids[uid];
+    if (!firstSeen) return false;
+    if (firstSeen - installTs < GRACE_MS) return false; // seen during initial load
+    return Date.now() - firstSeen < NEW_DURATION_MS;
+  }
+
   async function loadAgenda(silent = false) {
     if (!silent && !lastSuccessfulICS) {
       document.getElementById('loading').style.display = 'flex';
@@ -609,6 +655,7 @@
   }
 
   // ── Init: hydrate from localStorage cache (instant render on reload) ──────
+  initTracking();
   try {
     const cached = localStorage.getItem(CACHE_KEY);
     if (cached && cached.includes('BEGIN:VCALENDAR')) {
