@@ -194,11 +194,10 @@
   const TZ = 'Europe/Bratislava';
   const MONTHS_AHEAD = 3;
 
-  const NEW_DURATION_MS  = 7  * 86_400_000; // yellow dot shows for 7 days after first seen
+  const NEW_DURATION_MS   = 7  * 86_400_000; // yellow dot shows for 7 days after firstSeen
   const PRUNE_DURATION_MS = 60 * 86_400_000; // prune UID records older than 60 days
-  const GRACE_MS  = 2 * 60 * 1000;  // events seen in first 2 min after install = not new
-  const SEEN_KEY    = 'agenda-seen-uids';
-  const INSTALL_KEY = 'agenda-install-ts';
+  const TRACKER_KEY  = 'agenda-uid-tracker-v2';   // { uid: firstSeenMs }
+  const BASELINE_KEY = 'agenda-baseline-done-v2'; // '1' once initial baseline fetch completed
 
   const DAYS_SK = ['Nedeľa', 'Pondelok', 'Utorok', 'Streda', 'Štvrtok', 'Piatok', 'Sobota'];
   const MONTHS_SK = [
@@ -296,7 +295,9 @@
 
   // ── ICS parse & render ────────────────────────────────────────────────────
 
-  function parseAndRender(icsText) {
+  // opts.skipTracking: when true, do not update UID tracker (used for cache renders
+  // and offline fallback — only the authoritative fresh fetch should update state).
+  function parseAndRender(icsText, opts = {}) {
     // Outlook uses both "Central Europe Standard Time" (Windows name, no VTIMEZONE)
     // and "Customized Time Zone" (has VTIMEZONE in this feed, same CET/CEST rules).
     // Normalize to the one that has a VTIMEZONE definition so ical.js can resolve it.
@@ -323,14 +324,8 @@
 
     const vevents = comp.getAllSubcomponents('vevent');
 
-    // Collect all UIDs in this feed snapshot for new-event tracking
-    const allUids = [];
-    const uidSet = new Set();
-    for (const vevent of vevents) {
-      const uid = vevent.getFirstPropertyValue('uid');
-      if (uid && !uidSet.has(uid)) { uidSet.add(uid); allUids.push(uid); }
-    }
-    updateSeenUids(allUids);
+    // Update UID tracker only on authoritative fresh fetch (not cache/offline renders).
+    if (!opts.skipTracking) updateSeenUids(vevents);
 
     for (const vevent of vevents) {
       const event = new ICAL.Event(vevent);
@@ -586,41 +581,78 @@
   }
 
   // ── New-event yellow dot (UID tracking) ───────────────────────────────────
-  let seenUids  = {}; // { uid: firstSeenMs }
-  let installTs = 0;
+  // Approach: localStorage tracks UIDs (firstSeenMs). At baseline (very first
+  // fetch ever), use ICS CREATED as a tie-breaker — events with CREATED in the
+  // last 7 days get firstSeen=now (dot shown), older events get firstSeen=0
+  // (no dot). After baseline, any UID never seen before gets firstSeen=now.
+  // Cache-render skips tracking entirely → only the authoritative fresh fetch
+  // updates state, eliminating the inconsistency that broke previous attempts.
+
+  let seenUids = {};        // { uid: firstSeenMs }  (firstSeenMs=0 → baseline old, never show dot)
+  let baselineDone = false; // true after the initial baseline fetch has completed
 
   function initTracking() {
     try {
-      const raw = localStorage.getItem(SEEN_KEY);
+      const raw = localStorage.getItem(TRACKER_KEY);
       if (raw) seenUids = JSON.parse(raw);
-      installTs = Number(localStorage.getItem(INSTALL_KEY)) || 0;
-      if (!installTs) {
-        installTs = Date.now();
-        localStorage.setItem(INSTALL_KEY, String(installTs));
-      }
+      baselineDone = localStorage.getItem(BASELINE_KEY) === '1';
+      // One-time cleanup of stale keys from earlier attempts
+      localStorage.removeItem('agenda-seen-uids');
+      localStorage.removeItem('agenda-install-ts');
     } catch (_) {}
   }
 
-  // Called on every parseAndRender with the full list of UIDs in the feed.
-  function updateSeenUids(allUids) {
-    const now = Date.now();
-    for (const uid of allUids) {
-      if (!(uid in seenUids)) seenUids[uid] = now;
-    }
-    // Prune old records to keep localStorage lean
-    for (const uid in seenUids) {
-      if (now - seenUids[uid] > PRUNE_DURATION_MS) delete seenUids[uid];
-    }
-    try { localStorage.setItem(SEEN_KEY, JSON.stringify(seenUids)); } catch (_) {}
+  // Best-effort extraction of the CREATED timestamp from a VEVENT component.
+  function getCreatedMs(vevent) {
+    try {
+      const v = vevent.getFirstPropertyValue('created');
+      if (v && typeof v.toJSDate === 'function') return v.toJSDate().getTime();
+    } catch (_) {}
+    return null;
   }
 
-  // Returns true only for UIDs that first appeared AFTER the initial grace
-  // period — i.e. genuinely new events, not ones that were there on install.
+  // Called by parseAndRender on the authoritative fresh fetch only.
+  // vevents: array of ICAL.Component (VEVENTs from the feed).
+  function updateSeenUids(vevents) {
+    const now = Date.now();
+    const seenInThisFetch = new Set();
+
+    for (const vevent of vevents) {
+      const uid = vevent.getFirstPropertyValue('uid');
+      if (!uid || seenInThisFetch.has(uid)) continue;
+      seenInThisFetch.add(uid);
+      if (uid in seenUids) continue; // already tracked
+
+      if (!baselineDone) {
+        // BASELINE: only mark recently-CREATED events as new (firstSeen=now);
+        // everything else as baseline-old (firstSeen=0).
+        const createdMs = getCreatedMs(vevent);
+        const isRecent = createdMs && (now - createdMs < NEW_DURATION_MS);
+        seenUids[uid] = isRecent ? now : 0;
+      } else {
+        // Post-baseline: any never-before-seen UID is genuinely new.
+        seenUids[uid] = now;
+      }
+    }
+
+    if (!baselineDone) {
+      baselineDone = true;
+      try { localStorage.setItem(BASELINE_KEY, '1'); } catch (_) {}
+    }
+
+    // Prune records older than 60 days (skip baseline-old tombstones at 0)
+    for (const uid in seenUids) {
+      if (seenUids[uid] > 0 && now - seenUids[uid] > PRUNE_DURATION_MS) {
+        delete seenUids[uid];
+      }
+    }
+    try { localStorage.setItem(TRACKER_KEY, JSON.stringify(seenUids)); } catch (_) {}
+  }
+
   function isUidNew(uid) {
     if (!uid) return false;
     const firstSeen = seenUids[uid];
-    if (!firstSeen) return false;
-    if (firstSeen - installTs < GRACE_MS) return false; // seen during initial load
+    if (!firstSeen) return false; // baseline-old (=0) or unknown
     return Date.now() - firstSeen < NEW_DURATION_MS;
   }
 
@@ -640,9 +672,10 @@
     } catch (err) {
       document.getElementById('loading').style.display = 'none';
       if (lastSuccessfulICS) {
-        // Wi-Fi blip — keep showing cached data with a discrete offline badge
+        // Wi-Fi blip — keep showing cached data with a discrete offline badge.
+        // Skip UID tracking: only the fresh fetch is authoritative for "new" detection.
         isOffline = true;
-        try { parseAndRender(lastSuccessfulICS); } catch (_) {}
+        try { parseAndRender(lastSuccessfulICS, { skipTracking: true }); } catch (_) {}
         updateOfflineBadge();
       } else {
         const errEl = document.getElementById('error');
@@ -660,7 +693,8 @@
     const cached = localStorage.getItem(CACHE_KEY);
     if (cached && cached.includes('BEGIN:VCALENDAR')) {
       lastSuccessfulICS = cached;
-      parseAndRender(cached);
+      // Skip UID tracking on cache render: only the upcoming fresh fetch is authoritative.
+      parseAndRender(cached, { skipTracking: true });
       document.getElementById('loading').style.display = 'none';
     }
   } catch (_) {}
