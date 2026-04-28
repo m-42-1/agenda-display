@@ -18,7 +18,6 @@
       background: #000;
       color: #f0f0f0;
       padding-top: 40px;
-      -webkit-overflow-scrolling: touch;
       overflow-y: auto;
     }
 
@@ -116,7 +115,6 @@
       border-radius: 50%;
       margin-right: 8px;
       vertical-align: middle;
-      flex-shrink: 0;
     }
 
     .event-time {
@@ -203,11 +201,6 @@
     'januára', 'februára', 'marca', 'apríla', 'mája', 'júna',
     'júla', 'augusta', 'septembra', 'októbra', 'novembra', 'decembra'
   ];
-  const MONTHS_SK_NOM = [
-    'január', 'február', 'marec', 'apríl', 'máj', 'jún',
-    'júl', 'august', 'september', 'október', 'november', 'december'
-  ];
-
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   function localParts(jsDate) {
@@ -272,8 +265,6 @@
     document.getElementById('header-clock').textContent = timeFmt.format(now).replace(/\./g, ':');
 
     const p = localParts(now);
-    const dow = new Date(`${p.year}-${p.month}-${p.day}T12:00:00Z`).getUTCDay();
-    // day-of-week from dateKey
     const jsDay = new Date(`${p.year}-${p.month}-${p.day}T12:00:00Z`);
     document.getElementById('header-date').textContent =
       `${DAYS_SK[jsDay.getUTCDay()]}, ${parseInt(p.day, 10)}. ${MONTHS_SK[parseInt(p.month, 10) - 1]} ${p.year}`;
@@ -605,7 +596,7 @@
       if (lastSuccessfulICS) {
         // Wi-Fi blip — keep showing cached data with a discrete offline badge
         isOffline = true;
-        parseAndRender(lastSuccessfulICS);
+        try { parseAndRender(lastSuccessfulICS); } catch (_) {}
         updateOfflineBadge();
       } else {
         const errEl = document.getElementById('error');
