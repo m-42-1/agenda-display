@@ -111,12 +111,12 @@
       display: inline-flex;
       gap: 4px;
       margin-left: 6px;
-      vertical-align: middle;
+      vertical-align: text-top; /* dots sit in the upper third of the row */
     }
 
     .event-marker {
-      width: 9px;
-      height: 9px;
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
       display: none;
       flex-shrink: 0;
@@ -134,9 +134,9 @@
     }
 
     @keyframes pulse {
-      0%   { box-shadow: 0 0 0 0    rgba(239, 68, 68, 0.95); }
-      70%  { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0);    }
-      100% { box-shadow: 0 0 0 0    rgba(239, 68, 68, 0);    }
+      0%   { box-shadow: 0 0 0 0   rgba(239, 68, 68, 0.95); }
+      70%  { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);    }
+      100% { box-shadow: 0 0 0 0   rgba(239, 68, 68, 0);    }
     }
 
     .event-content {
@@ -208,6 +208,27 @@
   const TZ = 'Europe/Bratislava';
   const MONTHS_AHEAD = 3;
 
+  // Synthetic CET/CEST timezone — used as alias target when the feed references
+  // a TZID without defining its VTIMEZONE and defines no other VTIMEZONE either.
+  // (Outlook feeds have already changed their TZID scheme once; this is the net.)
+  const FALLBACK_VTZ = [
+    'BEGIN:VTIMEZONE',
+    'TZID:__cet-fallback__',
+    'BEGIN:STANDARD',
+    'DTSTART:16010101T030000',
+    'TZOFFSETFROM:+0200',
+    'TZOFFSETTO:+0100',
+    'RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=10',
+    'END:STANDARD',
+    'BEGIN:DAYLIGHT',
+    'DTSTART:16010101T020000',
+    'TZOFFSETFROM:+0100',
+    'TZOFFSETTO:+0200',
+    'RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=3',
+    'END:DAYLIGHT',
+    'END:VTIMEZONE',
+  ].join('\r\n');
+
   const NEW_DURATION_MS   = 7  * 86_400_000; // yellow dot shows for 7 days after firstSeen
   const PRUNE_DURATION_MS = 60 * 86_400_000; // prune UID records older than 60 days
   const TRACKER_KEY  = 'agenda-uid-tracker-v2';   // { uid: firstSeenMs }
@@ -220,15 +241,18 @@
   ];
   // ── Helpers ──────────────────────────────────────────────────────────────
 
+  // Formatters are hoisted — creating Intl.DateTimeFormat is expensive and
+  // localParts runs for every event on every refresh (and the clock every second).
+  const PARTS_FMT = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+    weekday: 'narrow',
+  });
+
   function localParts(jsDate) {
-    const fmt = new Intl.DateTimeFormat('en-CA', {
-      timeZone: TZ,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hour12: false,
-      weekday: 'narrow',
-    });
     const p = {};
-    for (const { type, value } of fmt.formatToParts(jsDate)) p[type] = value;
+    for (const { type, value } of PARTS_FMT.formatToParts(jsDate)) p[type] = value;
     // hour can be '24' when Intl wraps midnight
     if (p.hour === '24') p.hour = '00';
     return p;
@@ -244,12 +268,13 @@
     return `${p.hour}:${p.minute}`;
   }
 
+  const MIDNIGHT_FMT = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+
   // Returns a JS Date for midnight (00:00) Bratislava time on a given YYYY-MM-DD string
   function bratislavaMidnight(yyyy, mm, dd) {
-    const tzFmt = new Intl.DateTimeFormat('en-CA', {
-      timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hour12: false,
-    });
     // Accept both strings (already padded) and numbers — pad to be safe
     const yStr = String(yyyy).padStart(4, '0');
     const mStr = String(mm).padStart(2, '0');
@@ -257,7 +282,7 @@
     const utcStr = `${yStr}-${mStr}-${dStr}T00:00:00Z`;
     const ref = new Date(utcStr);
     const p = {};
-    for (const { type, value } of tzFmt.formatToParts(ref)) p[type] = value;
+    for (const { type, value } of MIDNIGHT_FMT.formatToParts(ref)) p[type] = value;
     // Difference between what UTC midnight shows as in Bratislava vs midnight
     const tzH = parseInt(p.hour, 10);
     const tzM = parseInt(p.minute, 10);
@@ -274,12 +299,13 @@
 
   // ── Clock & header date ───────────────────────────────────────────────────
 
+  const CLOCK_FMT = new Intl.DateTimeFormat('sk-SK', {
+    timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+
   function updateClock() {
     const now = new Date();
-    const timeFmt = new Intl.DateTimeFormat('sk-SK', {
-      timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-    });
-    document.getElementById('header-clock').textContent = timeFmt.format(now).replace(/\./g, ':');
+    document.getElementById('header-clock').textContent = CLOCK_FMT.format(now).replace(/\./g, ':');
 
     const p = localParts(now);
     const jsDay = new Date(`${p.year}-${p.month}-${p.day}T12:00:00Z`);
@@ -312,18 +338,32 @@
   // opts.skipTracking: when true, do not update UID tracker (used for cache renders
   // and offline fallback — only the authoritative fresh fetch should update state).
   function parseAndRender(icsText, opts = {}) {
-    // Outlook uses both "Central Europe Standard Time" (Windows name, no VTIMEZONE)
-    // and "Customized Time Zone" (has VTIMEZONE in this feed, same CET/CEST rules).
-    // Normalize to the one that has a VTIMEZONE definition so ical.js can resolve it.
-    icsText = icsText.replace(/TZID=Central Europe Standard Time/g, 'TZID=Customized Time Zone');
-
     const jcal = ICAL.parse(icsText);
     const comp = new ICAL.Component(jcal);
+    const vevents = comp.getAllSubcomponents('vevent');
 
     // Register VTIMEZONE components so ical.js resolves them when converting to JS Date.
     // register() accepts an ICAL.Component directly and wraps it internally.
-    for (const vtz of comp.getAllSubcomponents('vtimezone')) {
+    const vtzs = comp.getAllSubcomponents('vtimezone');
+    for (const vtz of vtzs) {
       ICAL.TimezoneService.register(vtz);
+    }
+
+    // Outlook references TZIDs it doesn't always define (it has shipped both
+    // "Central Europe Standard Time" and "Customized Time Zone", defining only
+    // one of them — and which one has changed over time). An unresolvable TZID
+    // makes ical.js treat times as floating, which silently breaks RRULE UNTIL
+    // comparisons (UTC) and drops the last occurrences of recurring series.
+    // Fix: alias every referenced-but-undefined TZID to a defined VTIMEZONE
+    // (they all describe the same CET/CEST rules in practice).
+    const aliasTarget = vtzs[0] || new ICAL.Component(ICAL.parse(FALLBACK_VTZ));
+    for (const vevent of vevents) {
+      for (const prop of vevent.getAllProperties()) {
+        const tzid = prop.getParameter('tzid');
+        if (tzid && !ICAL.TimezoneService.has(tzid)) {
+          ICAL.TimezoneService.register(tzid, new ICAL.Timezone({ component: aliasTarget, tzid }));
+        }
+      }
     }
 
     const now = new Date();
@@ -336,34 +376,64 @@
     // Map: dateKey → array of event objects
     const byDay = {};
 
-    const vevents = comp.getAllSubcomponents('vevent');
-
     // Update UID tracker only on authoritative fresh fetch (not cache/offline renders).
     if (!opts.skipTracking) updateSeenUids(vevents);
 
+    // Outlook publishes modified occurrences of recurring events as separate
+    // VEVENTs with RECURRENCE-ID + the master's UID. They must be related to
+    // the master, otherwise the master's iterator also yields the original
+    // occurrence → duplicates with stale time/title. Orphan exceptions
+    // (master not in feed) are rendered as standalone events.
+    const masters = new Map(); // uid → ICAL.Event
+    const exceptions = [];
+    const singles = [];
     for (const vevent of vevents) {
-      const event = new ICAL.Event(vevent);
+      try {
+        const event = new ICAL.Event(vevent);
+        if (event.isRecurrenceException()) exceptions.push(event);
+        else if (event.isRecurring()) masters.set(event.uid, event);
+        else singles.push(event);
+      } catch (_) { /* skip malformed VEVENT, keep the rest of the feed alive */ }
+    }
+    for (const ex of exceptions) {
+      const master = masters.get(ex.uid);
+      let related = false;
+      if (master) {
+        try { master.relateException(ex); related = true; } catch (_) {}
+      }
+      if (!related) singles.push(ex);
+    }
 
-      if (event.isRecurring()) {
+    for (const event of masters.values()) {
+      try {
         const iter = event.iterator();
         let next;
         // Higher safety bound for daily recurrences with old DTSTART
         // (e.g. event repeating since 2020 needs ~2000 iterations to reach today)
         let safety = 0;
         while ((next = iter.next()) && safety++ < 10000) {
-          const jsStart = next.toJSDate();
-          if (jsStart > windowEnd) break;
-          if (jsStart < windowStart) continue;
-          addEvent(byDay, event, next, event.getOccurrenceDetails(next).endDate);
+          if (next.toJSDate() > windowEnd) break;
+          let details;
+          try { details = event.getOccurrenceDetails(next); } catch (_) { continue; }
+          // details.item is the exception event for overridden occurrences
+          // (with its own summary/time), the master otherwise.
+          const occStart = details.startDate.toJSDate();
+          const occEnd = details.endDate ? details.endDate.toJSDate() : occStart;
+          if (occStart >= windowEnd || occEnd <= windowStart) continue;
+          addEvent(byDay, details.item, details.startDate, details.endDate);
         }
-      } else {
+      } catch (_) { /* one broken series must not kill the whole agenda */ }
+    }
+
+    for (const event of singles) {
+      try {
         const dtstart = event.startDate;
         const dtend = event.endDate;
         const jsStart = dtstart.toJSDate();
         const jsEnd = dtend ? dtend.toJSDate() : jsStart;
         if (jsStart >= windowEnd || jsEnd <= windowStart) continue;
         addEvent(byDay, event, dtstart, dtend);
-      }
+      } catch (_) { /* skip malformed event */ }
     }
 
     renderAgenda(byDay, windowStart, windowEnd);
