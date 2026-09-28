@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#000000">
   <title>Kalendár</title>
-  <script src="https://cdn.jsdelivr.net/npm/ical.js@1.5.0/build/ical.min.js"></script>
+  <script src="ical.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -37,10 +37,8 @@
 
     #offline-badge {
       display: none;
-      position: absolute;
-      top: 14px;
-      right: 16px;
-      font-size: 0.75rem;
+      margin-top: 6px;
+      font-size: 0.8rem;
       color: #f59e0b;
       background: #422006;
       padding: 3px 8px;
@@ -199,12 +197,12 @@
 <main id="agenda"></main>
 
 <script>
-  const ICS_URL = 'https://outlook.office365.com/owa/calendar/2e756fe3580945bd80f7c18d5eedf151@kultura.trnava.sk/fb299a1f15e14af1a6c09121b4f22ed610826515312205160777/calendar.ics';
-  const CORS_PROXIES = [
-    '',
-    'https://corsproxy.io/?url=',
-    'https://api.allorigins.win/raw?url=',
-  ];
+  // Own Cloudflare Worker (source: worker/calendar-proxy.js). Outlook serves the
+  // ICS without CORS headers, so the browser cannot fetch it directly.
+  const FEED_URL = 'https://agenda-ics.matuskoprda.workers.dev';
+  const FETCH_TIMEOUT_MS = 15 * 1000;
+  const REFRESH_OK_MS = 60 * 1000;
+  const REFRESH_FAIL_MS = 15 * 1000;
   const TZ = 'Europe/Bratislava';
   const MONTHS_AHEAD = 3;
 
@@ -319,18 +317,28 @@
   // ── ICS fetch ─────────────────────────────────────────────────────────────
 
   async function fetchICS() {
-    for (const proxy of CORS_PROXIES) {
-      try {
-        const bustUrl = ICS_URL + '?_=' + Date.now();
-        const url = proxy ? proxy + encodeURIComponent(bustUrl) : bustUrl;
-        const resp = await fetch(url, { cache: 'no-store' });
-        if (resp.ok) {
-          const text = await resp.text();
-          if (text.includes('BEGIN:VCALENDAR')) return text;
-        }
-      } catch (_) { /* try next */ }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const resp = await fetch(FEED_URL + '?_=' + Date.now(), {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      if (!resp.ok) throw new Error(`Server vrátil chybu ${resp.status}.`);
+      const text = await resp.text();
+      if (!text.includes('BEGIN:VCALENDAR')) throw new Error('Odpoveď nie je kalendár.');
+      return text;
+    } catch (err) {
+      if (err.name === 'AbortError') throw new Error('Server neodpovedal včas.');
+      if (err instanceof TypeError) {
+        throw new Error(navigator.onLine
+          ? 'Nepodarilo sa spojiť so serverom kalendára.'
+          : 'Bez pripojenia k internetu.');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
     }
-    throw new Error('Nepodarilo sa načítať kalendár ani cez proxy.');
   }
 
   // ── ICS parse & render ────────────────────────────────────────────────────
@@ -673,11 +681,29 @@
   // ── Main load ─────────────────────────────────────────────────────────────
 
   const CACHE_KEY = 'agenda-cache-ics';
+  const CACHE_TS_KEY = 'agenda-cache-ts';
   let lastSuccessfulICS = null;
+  let lastSuccessTs = 0;
   let isOffline = false;
 
+  // The badge states how old the shown data is, so stale data is never
+  // mistaken for current data during a long outage.
   function updateOfflineBadge() {
-    document.getElementById('offline-badge').style.display = isOffline ? 'block' : 'none';
+    const badge = document.getElementById('offline-badge');
+    if (!isOffline) {
+      badge.style.display = 'none';
+      return;
+    }
+    let text = '⚠ Offline';
+    if (lastSuccessTs) {
+      const then = new Date(lastSuccessTs);
+      const p = localParts(then);
+      text += dateKey(then) === dateKey(new Date())
+        ? ` · údaje z ${p.hour}:${p.minute}`
+        : ` · údaje z ${parseInt(p.day, 10)}. ${parseInt(p.month, 10)}. ${p.hour}:${p.minute}`;
+    }
+    badge.textContent = text;
+    badge.style.display = 'block';
   }
 
   // ── New-event yellow dot (UID tracking) ───────────────────────────────────
@@ -756,36 +782,81 @@
     return Date.now() - firstSeen < NEW_DURATION_MS;
   }
 
+  function showError(err) {
+    const errEl = document.getElementById('error');
+    errEl.innerHTML = '';
+    const title = document.createElement('strong');
+    title.textContent = 'Kalendár sa zatiaľ nepodarilo načítať';
+    const msg = document.createElement('div');
+    msg.textContent = 'Skúšam znova automaticky…';
+    const detail = document.createElement('div');
+    detail.style.cssText = 'color:#b0b0b0;font-size:0.9rem;margin-top:4px';
+    detail.textContent = err.message;
+    errEl.append(title, msg, detail);
+    errEl.style.display = 'block';
+  }
+
+  // Returns true on success so the scheduler can pick the next delay.
   async function loadAgenda(silent = false) {
     if (!silent && !lastSuccessfulICS) {
       document.getElementById('loading').style.display = 'flex';
     }
     try {
       const icsText = await fetchICS();
-      lastSuccessfulICS = icsText;
-      isOffline = false;
-      try { localStorage.setItem(CACHE_KEY, icsText); } catch (_) {}
+      // Page was loaded while offline and ical.js never arrived. Now that the
+      // network works, a reload is the only way to get it.
+      if (typeof ICAL === 'undefined') {
+        location.reload();
+        return false;
+      }
+      // Parse before touching the cache: a bad response must not replace good data.
       parseAndRender(icsText);
+      lastSuccessfulICS = icsText;
+      lastSuccessTs = Date.now();
+      try {
+        localStorage.setItem(CACHE_KEY, icsText);
+        localStorage.setItem(CACHE_TS_KEY, String(lastSuccessTs));
+      } catch (_) {}
+      isOffline = false;
       document.getElementById('loading').style.display = 'none';
       document.getElementById('error').style.display = 'none';
       updateOfflineBadge();
+      return true;
     } catch (err) {
       document.getElementById('loading').style.display = 'none';
       if (lastSuccessfulICS) {
-        // Wi-Fi blip — keep showing cached data with a discrete offline badge.
+        // Keep showing cached data; the badge says how old it is.
         // Skip UID tracking: only the fresh fetch is authoritative for "new" detection.
         isOffline = true;
         try { parseAndRender(lastSuccessfulICS, { skipTracking: true }); } catch (_) {}
         updateOfflineBadge();
       } else {
-        const errEl = document.getElementById('error');
-        errEl.style.display = 'block';
-        errEl.innerHTML = `<strong>Chyba pri načítaní kalendára</strong>
-          Skontrolujte internetové pripojenie a obnovte stránku.<br>
-          <span style="color:#b0b0b0;font-size:0.9rem">${err.message}</span>`;
+        showError(err);
       }
+      return false;
     }
   }
+
+  // Poll every minute while healthy, every 15 s while failing so the display
+  // recovers quickly once the network is back. Only one loop may run: a call
+  // arriving mid-fetch (e.g. the 'online' event) is dropped, since the running
+  // fetch reschedules itself when it finishes.
+  let refreshTimer = null;
+  let loadInFlight = false;
+  async function refreshLoop(silent) {
+    if (loadInFlight) return;
+    loadInFlight = true;
+    clearTimeout(refreshTimer);
+    let ok = false;
+    try {
+      ok = await loadAgenda(silent);
+    } finally {
+      loadInFlight = false;
+      refreshTimer = setTimeout(() => refreshLoop(true), ok ? REFRESH_OK_MS : REFRESH_FAIL_MS);
+    }
+  }
+
+  window.addEventListener('online', () => refreshLoop(true));
 
   // ── Init: hydrate from localStorage cache (instant render on reload) ──────
   initTracking();
@@ -793,14 +864,14 @@
     const cached = localStorage.getItem(CACHE_KEY);
     if (cached && cached.includes('BEGIN:VCALENDAR')) {
       lastSuccessfulICS = cached;
+      lastSuccessTs = Number(localStorage.getItem(CACHE_TS_KEY)) || 0;
       // Skip UID tracking on cache render: only the upcoming fresh fetch is authoritative.
       parseAndRender(cached, { skipTracking: true });
       document.getElementById('loading').style.display = 'none';
     }
   } catch (_) {}
 
-  loadAgenda();
-  setInterval(() => loadAgenda(true), 60 * 1000);
+  refreshLoop(false);
 
   // Re-apply event-current/event-past classes every minute (between fetches)
   setInterval(applyTodayStateClasses, 60 * 1000);

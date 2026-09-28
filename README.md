@@ -6,9 +6,10 @@ Jednoduchá statická HTML stránka pre zobrazenie kalendárovej agendy z Outloo
 
 - Agenda view na 3 mesiace dopredu
 - Slovenské názvy dní a mesiacov
-- Automatická aktualizácia každých 15 minút (bez reloadu stránky)
+- Automatická aktualizácia každú minútu (bez reloadu stránky), pri výpadku každých 15 sekúnd
 - Digitálne hodiny v hlavičke (aktualizácia každú sekundu)
-- Automatický CORS proxy fallback pre načítanie ICS feedu
+- ICS feed sa načítava cez vlastný Cloudflare Worker (Outlook neposiela CORS hlavičky)
+- Pri výpadku siete ostávajú zobrazené posledné načítané dáta s odznakom „⚠ Offline · údaje z HH:MM"
 - Správna konverzia časov z UTC do Europe/Bratislava (vrátane letného času)
 
 ## Deploy na GitHub Pages
@@ -50,10 +51,16 @@ Jednoduchá statická HTML stránka pre zobrazenie kalendárovej agendy z Outloo
    - **Reload on Idle**: vypnuté (stránka sa sama refreshuje)
    - **Allow JavaScript**: zapnuté (povinné)
 
+## Cloudflare Worker (proxy pre ICS feed)
+
+Outlook publikuje ICS feed bez `Access-Control-Allow-Origin`, takže ho prehliadač nevie načítať priamo. Verejné CORS proxy (corsproxy.io, allorigins) prestali fungovať, preto feed ide cez vlastný Worker: `https://agenda-ics.matuskoprda.workers.dev` (Cloudflare účet matuskoprda@gmail.com, free plán).
+
+Zdrojový kód Workera je v `worker/calendar-proxy.js`. Worker vracia iba jeden pevne nastavený kalendár, takže ho nie je možné zneužiť ako otvorený proxy.
+
+Úprava Workera: dash.cloudflare.com → **Workers & Pages** → `agenda-ics` → **Edit code** → vložiť obsah `worker/calendar-proxy.js` → **Deploy**.
+
 ## Zmena ICS feedu
 
-V súbore `index.html` nájdite riadok:
-```javascript
-const ICS_URL = 'https://outlook.office365.com/...';
-```
-a nahraďte URL vaším ICS feedom z Outlook kalendára.
+ICS URL je iba vo Workeri. V `worker/calendar-proxy.js` zmeňte konštantu `ICS_URL` a Worker znova nasaďte (postup vyššie). V `index.html` sa nič nemení. `FEED_URL` v ňom ukazuje na Worker.
+
+Ak by sa zmenila doména stránky, doplňte ju do `ALLOWED_ORIGINS` vo Workeri.
