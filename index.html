@@ -159,6 +159,10 @@
       white-space: pre-wrap;
     }
 
+    .day-empty {
+      padding: 7px 0;
+    }
+
     #loading {
       display: flex;
       align-items: center;
@@ -200,6 +204,13 @@
   // Own Cloudflare Worker (source: worker/calendar-proxy.js). Outlook serves the
   // ICS without CORS headers, so the browser cannot fetch it directly.
   const FEED_URL = 'https://agenda-ics.matuskoprda.workers.dev';
+  // Bump on every deploy: running kiosks compare it with the published page
+  // and reload themselves when it differs (see checkForUpdate).
+  const APP_VERSION = '2026-09-28.1';
+  const UPDATE_CHECK_MS = 10 * 60 * 1000;
+  const UPDATE_RELOAD_GUARD_MS = 30 * 60 * 1000;
+  const UPDATE_RELOAD_KEY = 'agenda-update-reload-ts';
+  const IDLE_SCROLL_RESET_MS = 2 * 60 * 1000;
   const FETCH_TIMEOUT_MS = 15 * 1000;
   const REFRESH_OK_MS = 60 * 1000;
   const REFRESH_FAIL_MS = 15 * 1000;
@@ -287,6 +298,12 @@
     // offset = tzH*60 + tzM minutes ahead of UTC
     const offsetMin = tzH * 60 + tzM;
     return new Date(ref.getTime() - offsetMin * 60000);
+  }
+
+  // Next day's Bratislava midnight. Not "+ 24 h": DST-change days are 23 or 25 h long.
+  function nextMidnightMs(y, m, d) {
+    const [ny, nm, nd] = utcYmd(new Date(Date.UTC(y, m - 1, d + 1))).split('-');
+    return bratislavaMidnight(ny, nm, nd).getTime();
   }
 
   function addMonths(date, months) {
@@ -481,7 +498,7 @@
         pushEntry(byDay, dayKey, {
           isAllDay: true,
           startMs: dayStartMs,
-          endMs: dayStartMs + 86_400_000,
+          endMs: nextMidnightMs(y, m, d),
           timeLabel: 'Celý deň',
           title,
           description,
@@ -538,7 +555,7 @@
         label = `od ${startTime}`;
         allDayFlag = false;
         startMs = jsStart.getTime();
-        endMs = dayStartMs + 86_400_000; // continues until end of this day
+        endMs = nextMidnightMs(y, mo, d); // continues until end of this day
       } else if (k === endKey) {
         label = `do ${endTime}`;
         allDayFlag = true; // sorts to top; this is a continuation ending today
@@ -548,7 +565,7 @@
         label = 'Celý deň';
         allDayFlag = true;
         startMs = dayStartMs;
-        endMs = dayStartMs + 86_400_000;
+        endMs = nextMidnightMs(y, mo, d);
       }
       pushEntry(byDay, k, {
         isAllDay: allDayFlag,
@@ -568,21 +585,19 @@
     const agenda = document.getElementById('agenda');
     agenda.innerHTML = '';
 
-    // Collect and sort keys within window
+    const todayKey = dateKey(new Date());
+
+    // Collect and sort keys within window. Today always gets a block: without
+    // it, an empty today leaves a future day at the top, easy to misread as today.
     const keys = Object.keys(byDay).filter(k => {
       const d = new Date(k + 'T12:00:00Z');
       return d >= windowStart && d < windowEnd;
-    }).sort();
-
-    if (keys.length === 0) {
-      agenda.innerHTML = '<p style="padding:24px 0;color:#888;">Žiadne udalosti v nasledujúcich 3 mesiacoch.</p>';
-      return;
-    }
-
-    const todayKey = dateKey(new Date());
+    });
+    if (!keys.includes(todayKey)) keys.push(todayKey);
+    keys.sort();
 
     for (const key of keys) {
-      const events = byDay[key].sort((a, b) => {
+      const events = (byDay[key] || []).sort((a, b) => {
         if (a.isAllDay && !b.isAllDay) return -1;
         if (!a.isAllDay && b.isAllDay) return 1;
         return a.startMs - b.startMs;
@@ -599,8 +614,19 @@
 
       const header = document.createElement('div');
       header.className = 'day-header';
-      header.textContent = dayLabel;
+      // Year omitted for today: the clock header already shows it, and it keeps
+      // the line from wrapping on a phone.
+      header.textContent = key === todayKey
+        ? `Dnes · ${dow}, ${parseInt(dd, 10)}. ${MONTHS_SK[parseInt(mm, 10) - 1]}`
+        : dayLabel;
       block.appendChild(header);
+
+      if (events.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'event-description day-empty';
+        empty.textContent = 'Dnes nie je nič naplánované';
+        block.appendChild(empty);
+      }
 
       for (const ev of events) {
         const row = document.createElement('div');
@@ -889,6 +915,47 @@
     if (document.visibilityState === 'visible' && !wakeLock) requestWakeLock();
   });
   requestWakeLock();
+
+  // ── Self-update: pick up new deploys without anyone touching the kiosk ─────
+  // Reloads only after the new page was fetched successfully, so the kiosk never
+  // navigates into a WebView error page. A page without APP_VERSION (captive
+  // portal, 404) is ignored. The guard caps reloads if a stale cached copy keeps
+  // coming back with the old version.
+  async function checkForUpdate() {
+    let html;
+    try {
+      const resp = await fetch('./?_=' + Date.now(), { cache: 'no-store' });
+      if (!resp.ok) return;
+      html = await resp.text();
+    } catch (_) { return; }
+    const m = html.match(/const APP_VERSION = '([\d.-]+)'/);
+    if (!m || m[1] === APP_VERSION) return;
+    let lastReload = 0;
+    try { lastReload = Number(localStorage.getItem(UPDATE_RELOAD_KEY)) || 0; } catch (_) {}
+    if (Date.now() - lastReload < UPDATE_RELOAD_GUARD_MS) return;
+    try { localStorage.setItem(UPDATE_RELOAD_KEY, String(Date.now())); } catch (_) {}
+    location.replace(location.pathname + '?v=' + encodeURIComponent(m[1]));
+  }
+  setInterval(checkForUpdate, UPDATE_CHECK_MS);
+
+  // ── Return to today after the kiosk has been left scrolled down ───────────
+  // The viewport scrolls, not body: body's overflow propagates to the viewport.
+  // Smooth scrolling never runs on a hidden page (screen off), so jump instead.
+  let idleScrollTimer = null;
+  function armIdleScrollReset() {
+    clearTimeout(idleScrollTimer);
+    idleScrollTimer = setTimeout(() => {
+      if (window.scrollY === 0) return;
+      const behavior = document.visibilityState === 'visible' ? 'smooth' : 'auto';
+      window.scrollTo({ top: 0, behavior });
+    }, IDLE_SCROLL_RESET_MS);
+  }
+  window.addEventListener('scroll', armIdleScrollReset, { passive: true });
+  window.addEventListener('touchstart', armIdleScrollReset, { passive: true });
+  // A reload (e.g. self-update) would otherwise restore the old scroll position
+  // without firing a scroll event, leaving the kiosk stuck away from today.
+  history.scrollRestoration = 'manual';
+  armIdleScrollReset();
 </script>
 </body>
 </html>

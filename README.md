@@ -10,6 +10,8 @@ Jednoduchá statická HTML stránka pre zobrazenie kalendárovej agendy z Outloo
 - Digitálne hodiny v hlavičke (aktualizácia každú sekundu)
 - ICS feed sa načítava cez vlastný Cloudflare Worker (Outlook neposiela CORS hlavičky)
 - Pri výpadku siete ostávajú zobrazené posledné načítané dáta s odznakom „⚠ Offline · údaje z HH:MM"
+- Nová verzia stránky sa na kiosk dostane sama do ~10 minút po deployi. Pri každej zmene treba zvýšiť `APP_VERSION` v `index.html`
+- Po 2 minútach bez dotyku sa agenda vráti na začiatok (dnešok)
 - Správna konverzia časov z UTC do Europe/Bratislava (vrátane letného času)
 
 ## Deploy na GitHub Pages
@@ -57,10 +59,12 @@ Outlook publikuje ICS feed bez `Access-Control-Allow-Origin`, takže ho prehliad
 
 Zdrojový kód Workera je v `worker/calendar-proxy.js`. Worker vracia iba jeden pevne nastavený kalendár, takže ho nie je možné zneužiť ako otvorený proxy.
 
+**Súkromie:** kalendár nie je tajný. ICS link je v `worker/calendar-proxy.js`, ktorý GitHub Pages zverejňuje, a Worker vráti celý feed komukoľvek, kto pozná jeho adresu. Samotná stránka je tiež verejná a ukazuje najbližšie 3 mesiace. Do kalendára preto nepíšte nič, čo nemá byť verejné.
+
 Úprava Workera: dash.cloudflare.com → **Workers & Pages** → `agenda-ics` → **Edit code** → vložiť obsah `worker/calendar-proxy.js` → **Deploy**.
 
 ## Zmena ICS feedu
 
-ICS URL je iba vo Workeri. V `worker/calendar-proxy.js` zmeňte konštantu `ICS_URL` a Worker znova nasaďte (postup vyššie). V `index.html` sa nič nemení. `FEED_URL` v ňom ukazuje na Worker.
+Stránka ICS URL nepozná, načítava ho cez Worker. V `worker/calendar-proxy.js` zmeňte konštantu `ICS_URL` a Worker znova nasaďte (postup vyššie). V `index.html` sa nič nemení. `FEED_URL` v ňom ukazuje na Worker.
 
 Ak by sa zmenila doména stránky, doplňte ju do `ALLOWED_ORIGINS` vo Workeri.
